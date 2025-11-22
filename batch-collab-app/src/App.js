@@ -1,7 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { MessageCircle, BookOpen, FileText, Bell, Send, Upload, X, User } from 'lucide-react';
+import { MessageCircle, BookOpen, FileText, Bell, Send, Upload, X, User, Database, Cloud } from 'lucide-react';
 
-// Mock storage implementation for local development
+// API Configuration - will use MongoDB when available, falls back to localStorage
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+
+// Mock storage implementation for fallback
 const mockStorage = {
   data: {},
   async get(key) {
@@ -22,7 +25,6 @@ const mockStorage = {
   }
 };
 
-// Use mock storage if window.storage is not available
 if (typeof window !== 'undefined' && !window.storage) {
   window.storage = mockStorage;
 }
@@ -46,26 +48,86 @@ export default function App() {
   const [announcements, setAnnouncements] = useState([]);
   const [newAnnouncement, setNewAnnouncement] = useState({ title: '', content: '' });
 
+  // Track if MongoDB backend is available
+  const [useMongoDb, setUseMongoDb] = useState(false);
+  const [backendStatus, setBackendStatus] = useState('checking');
+
+  // Check if MongoDB backend is available
   useEffect(() => {
-    const loadData = async () => {
+    const checkBackend = async () => {
       try {
-        const [msgRes, assRes, notesRes, annRes] = await Promise.all([
-          window.storage.get('messages').catch(() => null),
-          window.storage.get('assignments').catch(() => null),
-          window.storage.get('notes').catch(() => null),
-          window.storage.get('announcements').catch(() => null)
-        ]);
-        
-        if (msgRes?.value) setMessages(JSON.parse(msgRes.value));
-        if (assRes?.value) setAssignments(JSON.parse(assRes.value));
-        if (notesRes?.value) setNotes(JSON.parse(notesRes.value));
-        if (annRes?.value) setAnnouncements(JSON.parse(annRes.value));
+        const response = await fetch(API_URL.replace('/api', ''), {
+          method: 'GET',
+          signal: AbortSignal.timeout(3000)
+        });
+        if (response.ok) {
+          setUseMongoDb(true);
+          setBackendStatus('connected');
+          console.log('✅ MongoDB backend connected');
+        } else {
+          setUseMongoDb(false);
+          setBackendStatus('unavailable');
+          console.log('⚠️ Backend unavailable, using localStorage');
+        }
       } catch (err) {
-        console.error('Error loading data:', err);
+        setUseMongoDb(false);
+        setBackendStatus('unavailable');
+        console.log('⚠️ Backend unavailable, using localStorage');
       }
     };
-    loadData();
+    checkBackend();
   }, []);
+
+  // Load data from MongoDB or localStorage
+  useEffect(() => {
+    if (!isLoggedIn) return;
+
+    const loadData = async () => {
+      if (useMongoDb) {
+        // Load from MongoDB
+        try {
+          const [msgRes, assRes, notesRes, annRes] = await Promise.all([
+            fetch(`${API_URL}/messages`),
+            fetch(`${API_URL}/assignments`),
+            fetch(`${API_URL}/notes`),
+            fetch(`${API_URL}/announcements`)
+          ]);
+
+          if (msgRes.ok) setMessages(await msgRes.json());
+          if (assRes.ok) setAssignments(await assRes.json());
+          if (notesRes.ok) setNotes(await notesRes.json());
+          if (annRes.ok) setAnnouncements(await annRes.json());
+        } catch (err) {
+          console.error('Error fetching from MongoDB:', err);
+        }
+      } else {
+        // Load from localStorage
+        try {
+          const [msgRes, assRes, notesRes, annRes] = await Promise.all([
+            window.storage.get('messages').catch(() => null),
+            window.storage.get('assignments').catch(() => null),
+            window.storage.get('notes').catch(() => null),
+            window.storage.get('announcements').catch(() => null)
+          ]);
+          
+          if (msgRes?.value) setMessages(JSON.parse(msgRes.value));
+          if (assRes?.value) setAssignments(JSON.parse(assRes.value));
+          if (notesRes?.value) setNotes(JSON.parse(notesRes.value));
+          if (annRes?.value) setAnnouncements(JSON.parse(annRes.value));
+        } catch (err) {
+          console.error('Error loading from localStorage:', err);
+        }
+      }
+    };
+
+    loadData();
+    
+    // Poll for updates if using MongoDB
+    if (useMongoDb) {
+      const interval = setInterval(loadData, 3000);
+      return () => clearInterval(interval);
+    }
+  }, [isLoggedIn, useMongoDb]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -79,102 +141,194 @@ export default function App() {
 
   const handleSendMessage = async () => {
     if (newMessage.trim()) {
-      const msg = {
-        id: Date.now(),
-        user: username,
-        text: newMessage,
-        timestamp: new Date().toLocaleTimeString()
-      };
-      const updated = [...messages, msg];
-      setMessages(updated);
-      setNewMessage('');
-      try {
-        await window.storage.set('messages', JSON.stringify(updated), true);
-      } catch (err) {
-        console.error('Error saving message:', err);
+      if (useMongoDb) {
+        // Save to MongoDB
+        try {
+          const response = await fetch(`${API_URL}/messages`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user: username, text: newMessage })
+          });
+
+          if (response.ok) {
+            setNewMessage('');
+          }
+        } catch (err) {
+          console.error('Error sending message:', err);
+        }
+      } else {
+        // Save to localStorage
+        const msg = {
+          id: Date.now(),
+          user: username,
+          text: newMessage,
+          timestamp: new Date().toISOString()
+        };
+        const updated = [...messages, msg];
+        setMessages(updated);
+        setNewMessage('');
+        try {
+          await window.storage.set('messages', JSON.stringify(updated), true);
+        } catch (err) {
+          console.error('Error saving message:', err);
+        }
       }
     }
   };
 
   const handleAddAssignment = async () => {
     if (userRole === 'cr' && newAssignment.title && newAssignment.deadline) {
-      const assignment = {
-        id: Date.now(),
-        ...newAssignment,
-        postedBy: username,
-        postedAt: new Date().toLocaleDateString()
-      };
-      const updated = [assignment, ...assignments];
-      setAssignments(updated);
-      setNewAssignment({ title: '', subject: '', deadline: '', description: '' });
-      try {
-        await window.storage.set('assignments', JSON.stringify(updated), true);
-      } catch (err) {
-        console.error('Error saving assignment:', err);
+      if (useMongoDb) {
+        try {
+          const response = await fetch(`${API_URL}/assignments`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...newAssignment, postedBy: username })
+          });
+
+          if (response.ok) {
+            setNewAssignment({ title: '', subject: '', deadline: '', description: '' });
+          }
+        } catch (err) {
+          console.error('Error adding assignment:', err);
+        }
+      } else {
+        const assignment = {
+          id: Date.now(),
+          ...newAssignment,
+          postedBy: username,
+          postedAt: new Date().toISOString()
+        };
+        const updated = [assignment, ...assignments];
+        setAssignments(updated);
+        setNewAssignment({ title: '', subject: '', deadline: '', description: '' });
+        try {
+          await window.storage.set('assignments', JSON.stringify(updated), true);
+        } catch (err) {
+          console.error('Error saving assignment:', err);
+        }
       }
     }
   };
 
   const handleAddNote = async () => {
     if (newNote.title && newNote.subject) {
-      const note = {
-        id: Date.now(),
-        ...newNote,
-        uploadedBy: username,
-        uploadedAt: new Date().toLocaleDateString()
-      };
-      const updated = [note, ...notes];
-      setNotes(updated);
-      setNewNote({ title: '', subject: '', description: '' });
-      try {
-        await window.storage.set('notes', JSON.stringify(updated), true);
-      } catch (err) {
-        console.error('Error saving note:', err);
+      if (useMongoDb) {
+        try {
+          const response = await fetch(`${API_URL}/notes`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...newNote, uploadedBy: username })
+          });
+
+          if (response.ok) {
+            setNewNote({ title: '', subject: '', description: '' });
+          }
+        } catch (err) {
+          console.error('Error adding note:', err);
+        }
+      } else {
+        const note = {
+          id: Date.now(),
+          ...newNote,
+          uploadedBy: username,
+          uploadedAt: new Date().toISOString()
+        };
+        const updated = [note, ...notes];
+        setNotes(updated);
+        setNewNote({ title: '', subject: '', description: '' });
+        try {
+          await window.storage.set('notes', JSON.stringify(updated), true);
+        } catch (err) {
+          console.error('Error saving note:', err);
+        }
       }
     }
   };
 
   const handleAddAnnouncement = async () => {
     if (userRole === 'cr' && newAnnouncement.title && newAnnouncement.content) {
-      const announcement = {
-        id: Date.now(),
-        ...newAnnouncement,
-        postedBy: username,
-        postedAt: new Date().toLocaleDateString()
-      };
-      const updated = [announcement, ...announcements];
-      setAnnouncements(updated);
-      setNewAnnouncement({ title: '', content: '' });
-      try {
-        await window.storage.set('announcements', JSON.stringify(updated), true);
-      } catch (err) {
-        console.error('Error saving announcement:', err);
+      if (useMongoDb) {
+        try {
+          const response = await fetch(`${API_URL}/announcements`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...newAnnouncement, postedBy: username })
+          });
+
+          if (response.ok) {
+            setNewAnnouncement({ title: '', content: '' });
+          }
+        } catch (err) {
+          console.error('Error adding announcement:', err);
+        }
+      } else {
+        const announcement = {
+          id: Date.now(),
+          ...newAnnouncement,
+          postedBy: username,
+          postedAt: new Date().toISOString()
+        };
+        const updated = [announcement, ...announcements];
+        setAnnouncements(updated);
+        setNewAnnouncement({ title: '', content: '' });
+        try {
+          await window.storage.set('announcements', JSON.stringify(updated), true);
+        } catch (err) {
+          console.error('Error saving announcement:', err);
+        }
       }
     }
   };
 
   const handleDeleteAssignment = async (id) => {
     if (userRole === 'cr') {
-      const updated = assignments.filter(a => a.id !== id);
-      setAssignments(updated);
-      try {
-        await window.storage.set('assignments', JSON.stringify(updated), true);
-      } catch (err) {
-        console.error('Error deleting assignment:', err);
+      if (useMongoDb) {
+        try {
+          await fetch(`${API_URL}/assignments/${id}`, { method: 'DELETE' });
+        } catch (err) {
+          console.error('Error deleting assignment:', err);
+        }
+      } else {
+        const updated = assignments.filter(a => a.id !== id);
+        setAssignments(updated);
+        try {
+          await window.storage.set('assignments', JSON.stringify(updated), true);
+        } catch (err) {
+          console.error('Error deleting assignment:', err);
+        }
       }
     }
   };
 
   const handleDeleteNote = async (id, uploadedBy) => {
     if (uploadedBy === username || userRole === 'cr') {
-      const updated = notes.filter(n => n.id !== id);
-      setNotes(updated);
-      try {
-        await window.storage.set('notes', JSON.stringify(updated), true);
-      } catch (err) {
-        console.error('Error deleting note:', err);
+      if (useMongoDb) {
+        try {
+          await fetch(`${API_URL}/notes/${id}`, { method: 'DELETE' });
+        } catch (err) {
+          console.error('Error deleting note:', err);
+        }
+      } else {
+        const updated = notes.filter(n => n.id !== id);
+        setNotes(updated);
+        try {
+          await window.storage.set('notes', JSON.stringify(updated), true);
+        } catch (err) {
+          console.error('Error deleting note:', err);
+        }
       }
     }
+  };
+
+  const formatTimestamp = (timestamp) => {
+    const date = new Date(timestamp);
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
+  const formatDate = (timestamp) => {
+    const date = new Date(timestamp);
+    return date.toLocaleDateString();
   };
 
   if (!isLoggedIn) {
@@ -196,6 +350,7 @@ export default function App() {
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
+                onKeyPress={(e) => e.key === 'Enter' && handleLogin()}
                 className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
                 placeholder="Enter your name"
               />
@@ -220,6 +375,32 @@ export default function App() {
               Enter Platform
             </button>
           </div>
+
+          {backendStatus === 'checking' && (
+            <div className="mt-6 p-4 bg-blue-50 rounded-lg border border-blue-200">
+              <p className="text-xs text-blue-800 text-center">
+                🔍 Checking for MongoDB backend...
+              </p>
+            </div>
+          )}
+
+          {backendStatus === 'connected' && (
+            <div className="mt-6 p-4 bg-green-50 rounded-lg border border-green-200">
+              <p className="text-xs text-green-800 text-center">
+                <strong>✅ MongoDB Connected!</strong><br/>
+                Using cloud database
+              </p>
+            </div>
+          )}
+
+          {backendStatus === 'unavailable' && (
+            <div className="mt-6 p-4 bg-yellow-50 rounded-lg border border-yellow-200">
+              <p className="text-xs text-yellow-800 text-center">
+                <strong>⚠️ MongoDB Unavailable</strong><br/>
+                Using local storage (data saved in browser)
+              </p>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -233,12 +414,22 @@ export default function App() {
             <BookOpen size={28} />
             <h1 className="text-xl font-bold">Batch Platform</h1>
           </div>
-          <div className="flex items-center gap-2 bg-indigo-700 px-4 py-2 rounded-lg">
-            <User size={18} />
-            <span className="text-sm">{username}</span>
-            <span className="text-xs bg-indigo-800 px-2 py-1 rounded">
-              {userRole === 'cr' ? 'CR' : 'Student'}
-            </span>
+          <div className="flex items-center gap-3">
+            {/* Storage indicator */}
+            <div className={`flex items-center gap-2 px-3 py-1 rounded text-xs ${
+              useMongoDb ? 'bg-green-600' : 'bg-yellow-600'
+            }`}>
+              {useMongoDb ? <Cloud size={14} /> : <Database size={14} />}
+              {useMongoDb ? 'Cloud DB' : 'Local'}
+            </div>
+            
+            <div className="flex items-center gap-2 bg-indigo-700 px-4 py-2 rounded-lg">
+              <User size={18} />
+              <span className="text-sm">{username}</span>
+              <span className="text-xs bg-indigo-800 px-2 py-1 rounded">
+                {userRole === 'cr' ? 'CR' : 'Student'}
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -275,12 +466,12 @@ export default function App() {
             </div>
             
             <div className="flex-1 overflow-y-auto p-4 space-y-3">
-              {messages.map(msg => (
-                <div key={msg.id} className={`flex ${msg.user === username ? 'justify-end' : 'justify-start'}`}>
+              {messages.map((msg) => (
+                <div key={msg._id || msg.id} className={`flex ${msg.user === username ? 'justify-end' : 'justify-start'}`}>
                   <div className={`max-w-md ${msg.user === username ? 'bg-indigo-600 text-white' : 'bg-gray-100'} rounded-lg p-3`}>
                     <div className="text-xs font-semibold mb-1">{msg.user}</div>
                     <div className="text-sm">{msg.text}</div>
-                    <div className="text-xs opacity-70 mt-1">{msg.timestamp}</div>
+                    <div className="text-xs opacity-70 mt-1">{formatTimestamp(msg.timestamp)}</div>
                   </div>
                 </div>
               ))}
@@ -350,8 +541,8 @@ export default function App() {
             )}
             
             <div className="space-y-4">
-              {assignments.map(assignment => (
-                <div key={assignment.id} className="bg-white rounded-lg shadow-sm p-6">
+              {assignments.map((assignment) => (
+                <div key={assignment._id || assignment.id} className="bg-white rounded-lg shadow-sm p-6">
                   <div className="flex justify-between items-start mb-2">
                     <div className="flex-1">
                       <h3 className="text-xl font-semibold text-gray-800">{assignment.title}</h3>
@@ -361,13 +552,13 @@ export default function App() {
                       </div>
                     </div>
                     {userRole === 'cr' && (
-                      <button onClick={() => handleDeleteAssignment(assignment.id)} className="text-red-600 hover:text-red-800">
+                      <button onClick={() => handleDeleteAssignment(assignment._id || assignment.id)} className="text-red-600 hover:text-red-800">
                         <X size={20} />
                       </button>
                     )}
                   </div>
                   <p className="text-gray-700 mt-3">{assignment.description}</p>
-                  <div className="text-sm text-gray-500 mt-3">Posted by {assignment.postedBy} on {assignment.postedAt}</div>
+                  <div className="text-sm text-gray-500 mt-3">Posted by {assignment.postedBy} on {formatDate(assignment.postedAt)}</div>
                 </div>
               ))}
             </div>
@@ -411,8 +602,8 @@ export default function App() {
             </div>
             
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {notes.map(note => (
-                <div key={note.id} className="bg-white rounded-lg shadow-sm p-6">
+              {notes.map((note) => (
+                <div key={note._id || note.id} className="bg-white rounded-lg shadow-sm p-6">
                   <div className="flex justify-between items-start mb-2">
                     <div>
                       <h3 className="text-lg font-semibold text-gray-800">{note.title}</h3>
@@ -421,14 +612,14 @@ export default function App() {
                       </span>
                     </div>
                     {(note.uploadedBy === username || userRole === 'cr') && (
-                      <button onClick={() => handleDeleteNote(note.id, note.uploadedBy)} className="text-red-600 hover:text-red-800">
+                      <button onClick={() => handleDeleteNote(note._id || note.id, note.uploadedBy)} className="text-red-600 hover:text-red-800">
                         <X size={20} />
                       </button>
                     )}
                   </div>
                   <p className="text-gray-700 mt-3 text-sm">{note.description}</p>
                   <div className="text-xs text-gray-500 mt-3">
-                    Uploaded by {note.uploadedBy} on {note.uploadedAt}
+                    Uploaded by {note.uploadedBy} on {formatDate(note.uploadedAt)}
                   </div>
                 </div>
               ))}
@@ -466,15 +657,15 @@ export default function App() {
             )}
             
             <div className="space-y-4">
-              {announcements.map(announcement => (
-                <div key={announcement.id} className="bg-gradient-to-r from-yellow-50 to-orange-50 border-l-4 border-orange-500 rounded-lg shadow-sm p-6">
+              {announcements.map((announcement) => (
+                <div key={announcement._id || announcement.id} className="bg-gradient-to-r from-yellow-50 to-orange-50 border-l-4 border-orange-500 rounded-lg shadow-sm p-6">
                   <div className="flex items-start gap-3">
                     <Bell className="text-orange-500 mt-1" size={24} />
                     <div className="flex-1">
                       <h3 className="text-xl font-semibold text-gray-800 mb-2">{announcement.title}</h3>
                       <p className="text-gray-700">{announcement.content}</p>
                       <div className="text-sm text-gray-600 mt-3">
-                        Posted by {announcement.postedBy} on {announcement.postedAt}
+                        Posted by {announcement.postedBy} on {formatDate(announcement.postedAt)}
                       </div>
                     </div>
                   </div>
